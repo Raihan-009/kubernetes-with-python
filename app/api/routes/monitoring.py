@@ -5,18 +5,17 @@ from typing import Dict, List, Any
 router = APIRouter()
 k8s_client = K8sClient()
 
-@router.get("/health", summary="Get unhealthy resources across cluster")
+@router.get("/health", summary="Get unhealthy pods across cluster")
 async def get_unhealthy_resources():
     """
-    Get all unhealthy resources (Failed/Pending pods, Unhealthy deployments, etc.)
+    Get all unhealthy pods (Failed/Pending/CrashLoopBackOff) with their events
     """
     try:
         # Get all namespaces
         namespaces = k8s_client.core_v1.list_namespace()
         unhealthy_resources = {
-            "pods": [],
-            "deployments": [],
-            "total_unhealthy": 0
+            "unhealthy_pods": [],
+            "total_unhealthy_pods": 0
         }
 
         for ns in namespaces.items:
@@ -25,95 +24,72 @@ async def get_unhealthy_resources():
             # Check pods
             pods = k8s_client.core_v1.list_namespaced_pod(namespace)
             for pod in pods.items:
-                if pod.status.phase in ["Failed", "Pending"] or any(
-                    container.ready is False 
-                    for container in (pod.status.container_statuses or [])
-                ):
-                    container_statuses = []
-                    for container in (pod.status.container_statuses or []):
-                        state = next(iter(container.state.__dict__.keys()))
-                        state_obj = getattr(container.state, state)
-                        
-                        status = {
-                            "name": container.name,
-                            "ready": container.ready,
-                            "restart_count": container.restart_count,
-                            "state": state,
-                        }
-                        
-                        # Add reason and message if available
-                        if hasattr(state_obj, 'reason'):
-                            status["reason"] = state_obj.reason
-                        if hasattr(state_obj, 'message'):
-                            status["message"] = state_obj.message
-                            
-                        container_statuses.append(status)
+                # Check if pod is unhealthy
+                is_unhealthy = (
+                    pod.status.phase in ["Failed", "Pending"] or 
+                    any(
+                        container.ready is False or 
+                        (container.state.waiting and container.state.waiting.reason in ["CrashLoopBackOff", "Error", "CreateContainerError"])
+                        for container in (pod.status.container_statuses or [])
+                    )
+                )
 
-                    unhealthy_resources["pods"].append({
+                if is_unhealthy:
+                    # Get events for this pod
+                    events = k8s_client.core_v1.list_namespaced_event(
+                        namespace=namespace,
+                        field_selector=f'involvedObject.name={pod.metadata.name}'
+                    )
+
+                    # Get the main error reason from container statuses
+                    error_reasons = []
+                    if pod.status.container_statuses:
+                        for container in pod.status.container_statuses:
+                            if container.state.waiting:
+                                error_reasons.append(f"{container.name}: {container.state.waiting.reason}")
+                            elif container.state.terminated and container.state.terminated.exit_code != 0:
+                                error_reasons.append(f"{container.name}: Terminated with exit code {container.state.terminated.exit_code}")
+
+                    unhealthy_resources["unhealthy_pods"].append({
                         "name": pod.metadata.name,
                         "namespace": namespace,
-                        "phase": pod.status.phase,
-                        "conditions": [
-                            {
-                                "type": condition.type,
-                                "status": condition.status,
-                                "reason": condition.reason,
-                                "message": condition.message
-                            }
-                            for condition in pod.status.conditions or []
-                        ],
-                        "container_statuses": container_statuses,
+                        "status": pod.status.phase,
                         "node": pod.spec.node_name,
-                        "start_time": pod.status.start_time,
-                        "message": pod.status.message if pod.status.message else None,
-                        "reason": pod.status.reason if pod.status.reason else None
-                    })
-
-            # Check deployments
-            deployments = k8s_client.apps_v1.list_namespaced_deployment(namespace)
-            for dep in deployments.items:
-                if (dep.status.available_replicas or 0) != dep.spec.replicas:
-                    unhealthy_resources["deployments"].append({
-                        "name": dep.metadata.name,
-                        "namespace": namespace,
-                        "replicas": {
-                            "desired": dep.spec.replicas,
-                            "available": dep.status.available_replicas or 0,
-                            "ready": dep.status.ready_replicas or 0,
-                            "updated": dep.status.updated_replicas or 0
-                        },
-                        "conditions": [
+                        "error_reasons": error_reasons,
+                        "events": [
                             {
-                                "type": condition.type,
-                                "status": condition.status,
-                                "reason": condition.reason,
-                                "message": condition.message,
-                                "last_update": condition.last_update_time,
-                                "last_transition": condition.last_transition_time
+                                "type": event.type,
+                                "reason": event.reason,
+                                "message": event.message,
+                                "count": event.count,
+                                "first_timestamp": event.first_timestamp,
+                                "last_timestamp": event.last_timestamp,
+                                "source": event.source.component if event.source else None
                             }
-                            for condition in dep.status.conditions or []
-                        ],
-                        "containers": [
-                            {
-                                "name": container.name,
-                                "image": container.image,
-                                "ready": False  # Since deployment is unhealthy
-                            }
-                            for container in dep.spec.template.spec.containers
+                            for event in sorted(
+                                events.items,
+                                key=lambda x: x.last_timestamp or x.first_timestamp,
+                                reverse=True
+                            )
                         ]
                     })
 
-        # Calculate total unhealthy resources
-        unhealthy_resources["total_unhealthy"] = len(unhealthy_resources["pods"]) + len(unhealthy_resources["deployments"])
+        # Update total count
+        unhealthy_resources["total_unhealthy_pods"] = len(unhealthy_resources["unhealthy_pods"])
         
         # Add summary
         unhealthy_resources["summary"] = {
-            "unhealthy_pods": len(unhealthy_resources["pods"]),
-            "unhealthy_deployments": len(unhealthy_resources["deployments"]),
+            "total_unhealthy_pods": len(unhealthy_resources["unhealthy_pods"]),
             "affected_namespaces": len(set(
-                [res["namespace"] for res in unhealthy_resources["pods"]] +
-                [res["namespace"] for res in unhealthy_resources["deployments"]]
-            ))
+                pod["namespace"] for pod in unhealthy_resources["unhealthy_pods"]
+            )),
+            "status_breakdown": {
+                status: len([
+                    pod for pod in unhealthy_resources["unhealthy_pods"]
+                    if pod["status"] == status
+                ])
+                for status in set(pod["status"] for pod in unhealthy_resources["unhealthy_pods"])
+            }
         }
 
         return unhealthy_resources

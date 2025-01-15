@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import pods, deployments, jobs, namespaces, cluster
+from app.api.routes import pods, deployments, jobs, namespaces, cluster, services
 
 app = FastAPI(
     title="Kubernetes API",
@@ -20,6 +20,7 @@ app.add_middleware(
 # Include routers
 app.include_router(cluster.router, prefix="/api/cluster", tags=["Cluster"])
 app.include_router(namespaces.router, prefix="/api/namespaces", tags=["Namespaces"])
+app.include_router(services.router, prefix="/api/services", tags=["Services"])
 app.include_router(pods.router, prefix="/api/pods", tags=["Pods"])
 app.include_router(deployments.router, prefix="/api/deployments", tags=["Deployments"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])

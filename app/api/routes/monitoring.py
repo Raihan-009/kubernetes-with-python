@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.services.k8s_client import K8sClient
 from typing import Dict, List, Any
+import datetime
 
 router = APIRouter()
 k8s_client = K8sClient()
@@ -68,7 +69,10 @@ async def get_unhealthy_resources():
                             }
                             for event in sorted(
                                 events.items,
-                                key=lambda x: x.last_timestamp or x.first_timestamp,
+                                key=lambda x: (
+                                    x.last_timestamp.replace(tzinfo=None) if x.last_timestamp else datetime.datetime.min,
+                                    x.first_timestamp.replace(tzinfo=None) if x.first_timestamp else datetime.datetime.min
+                                ),
                                 reverse=True
                             )
                         ]

@@ -4,33 +4,14 @@ from app.services.k8s_client import K8sClient
 router = APIRouter()
 k8s_client = K8sClient()
 
-@router.get("/resources", summary="Get all cluster resources")
+@router.get("/resources", summary="Get all workload resources")
 async def get_cluster_resources():
     """
-    Get all resources across the cluster with their status and metrics
+    Get all workload resources (Deployments, StatefulSets, DaemonSets, and standalone Pods)
+    with their metrics and status
     """
     try:
-        resources = k8s_client.get_cluster_resources()
-        return {
-            "cluster_resources": resources,
-            "summary": {
-                "total_nodes": len(resources["nodes"]),
-                "total_pods": len(resources["pods"]),
-                "total_deployments": len(resources["deployments"]),
-                "total_services": len(resources["services"]),
-                "total_statefulsets": len(resources["statefulsets"]),
-                "total_daemonsets": len(resources["daemonsets"]),
-                "nodes_status": {
-                    "ready": sum(1 for node in resources["nodes"] if node["status"] == "Ready"),
-                    "not_ready": sum(1 for node in resources["nodes"] if node["status"] != "Ready")
-                },
-                "pods_status": {
-                    "running": sum(1 for pod in resources["pods"] if pod["status"] == "Running"),
-                    "pending": sum(1 for pod in resources["pods"] if pod["status"] == "Pending"),
-                    "failed": sum(1 for pod in resources["pods"] if pod["status"] == "Failed"),
-                    "succeeded": sum(1 for pod in resources["pods"] if pod["status"] == "Succeeded")
-                }
-            }
-        }
+        return k8s_client.get_workload_resources()
     except Exception as e:
+        print(f"Error getting cluster resources: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

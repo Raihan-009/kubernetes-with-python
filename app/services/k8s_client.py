@@ -315,3 +315,202 @@ class K8sClient:
         except Exception as e:
             print(f"Error getting services: {str(e)}")
             raise e 
+
+    def get_workload_resources(self) -> Dict[str, list]:
+        """Get all workload resources with their metrics"""
+        try:
+            resources = []
+            
+            # Get all namespaces
+            namespaces = [ns.metadata.name for ns in self.core_v1.list_namespace().items]
+            
+            for namespace in namespaces:
+                try:
+                    # Get metrics for all pods in the namespace
+                    pod_metrics = {}
+                    try:
+                        metrics_list = self.custom_objects.list_namespaced_custom_object(
+                            group="metrics.k8s.io",
+                            version="v1beta1",
+                            namespace=namespace,
+                            plural="pods"
+                        )
+                        
+                        for metric in metrics_list.get('items', []):
+                            pod_name = metric['metadata']['name']
+                            containers = metric.get('containers', [])
+                            total_cpu = 0
+                            total_memory = 0
+                            
+                            for container in containers:
+                                cpu = container.get('usage', {}).get('cpu', '0')
+                                memory = container.get('usage', {}).get('memory', '0')
+                                
+                                # Convert CPU to millicores
+                                if cpu.endswith('n'):
+                                    cpu = int(cpu[:-1]) / 1000000
+                                elif cpu.endswith('m'):
+                                    cpu = int(cpu[:-1])
+                                
+                                # Convert memory to Mi
+                                if memory.endswith('Ki'):
+                                    memory = int(memory[:-2]) / 1024
+                                elif memory.endswith('Mi'):
+                                    memory = int(memory[:-2])
+                                elif memory.endswith('Gi'):
+                                    memory = int(memory[:-2]) * 1024
+                                
+                                total_cpu += cpu
+                                total_memory += memory
+                                
+                            pod_metrics[pod_name] = {
+                                'cpu': f"{total_cpu}m",
+                                'memory': f"{total_memory}Mi"
+                            }
+                    except Exception as e:
+                        print(f"Error getting metrics for namespace {namespace}: {str(e)}")
+                        pod_metrics = {}
+
+                    # Get deployments
+                    deployments = self.apps_v1.list_namespaced_deployment(namespace)
+                    for dep in deployments.items:
+                        total_cpu = 0
+                        total_memory = 0
+                        dep_pods = self.core_v1.list_namespaced_pod(
+                            namespace=namespace,
+                            label_selector=','.join(f'{k}={v}' for k, v in (dep.spec.selector.match_labels or {}).items())
+                        )
+                        
+                        for pod in dep_pods.items:
+                            metrics = pod_metrics.get(pod.metadata.name, {'cpu': '0m', 'memory': '0Mi'})
+                            total_cpu += float(metrics['cpu'].rstrip('m'))
+                            total_memory += float(metrics['memory'].rstrip('Mi'))
+                        
+                        resources.append({
+                            "kind": "Deployment",
+                            "name": dep.metadata.name,
+                            "namespace": namespace,
+                            "cluster": self.get_cluster_name(),
+                            "status": "Healthy" if (dep.status.available_replicas or 0) == dep.spec.replicas else "Unhealthy",
+                            "pods_count": {
+                                "desired": dep.spec.replicas,
+                                "available": dep.status.available_replicas or 0
+                            },
+                            "last_change": dep.metadata.creation_timestamp,
+                            "version": dep.metadata.resource_version,
+                            "cpu_usage": f"{total_cpu}m",
+                            "memory_usage": f"{total_memory}Mi"
+                        })
+
+                    # Get StatefulSets
+                    statefulsets = self.apps_v1.list_namespaced_stateful_set(namespace)
+                    for sts in statefulsets.items:
+                        total_cpu = 0
+                        total_memory = 0
+                        sts_pods = self.core_v1.list_namespaced_pod(
+                            namespace=namespace,
+                            label_selector=','.join(f'{k}={v}' for k, v in (sts.spec.selector.match_labels or {}).items())
+                        )
+                        
+                        for pod in sts_pods.items:
+                            metrics = pod_metrics.get(pod.metadata.name, {'cpu': '0m', 'memory': '0Mi'})
+                            total_cpu += float(metrics['cpu'].rstrip('m'))
+                            total_memory += float(metrics['memory'].rstrip('Mi'))
+                        
+                        resources.append({
+                            "kind": "StatefulSet",
+                            "name": sts.metadata.name,
+                            "namespace": namespace,
+                            "cluster": self.get_cluster_name(),
+                            "status": "Healthy" if (sts.status.ready_replicas or 0) == sts.spec.replicas else "Unhealthy",
+                            "pods_count": {
+                                "desired": sts.spec.replicas,
+                                "available": sts.status.ready_replicas or 0
+                            },
+                            "last_change": sts.metadata.creation_timestamp,
+                            "version": sts.metadata.resource_version,
+                            "cpu_usage": f"{total_cpu}m",
+                            "memory_usage": f"{total_memory}Mi"
+                        })
+
+                    # Get DaemonSets
+                    daemonsets = self.apps_v1.list_namespaced_daemon_set(namespace)
+                    for ds in daemonsets.items:
+                        total_cpu = 0
+                        total_memory = 0
+                        ds_pods = self.core_v1.list_namespaced_pod(
+                            namespace=namespace,
+                            label_selector=','.join(f'{k}={v}' for k, v in (ds.spec.selector.match_labels or {}).items())
+                        )
+                        
+                        for pod in ds_pods.items:
+                            metrics = pod_metrics.get(pod.metadata.name, {'cpu': '0m', 'memory': '0Mi'})
+                            total_cpu += float(metrics['cpu'].rstrip('m'))
+                            total_memory += float(metrics['memory'].rstrip('Mi'))
+                        
+                        resources.append({
+                            "kind": "DaemonSet",
+                            "name": ds.metadata.name,
+                            "namespace": namespace,
+                            "cluster": self.get_cluster_name(),
+                            "status": "Healthy" if ds.status.number_ready == ds.status.desired_number_scheduled else "Unhealthy",
+                            "pods_count": {
+                                "desired": ds.status.desired_number_scheduled,
+                                "available": ds.status.number_ready
+                            },
+                            "last_change": ds.metadata.creation_timestamp,
+                            "version": ds.metadata.resource_version,
+                            "cpu_usage": f"{total_cpu}m",
+                            "memory_usage": f"{total_memory}Mi"
+                        })
+
+                    # Get standalone pods (pods not managed by any controller)
+                    pods = self.core_v1.list_namespaced_pod(namespace)
+                    for pod in pods.items:
+                        if not pod.metadata.owner_references:  # Standalone pod
+                            metrics = pod_metrics.get(pod.metadata.name, {'cpu': '0m', 'memory': '0Mi'})
+                            resources.append({
+                                "kind": "Pod",
+                                "name": pod.metadata.name,
+                                "namespace": namespace,
+                                "cluster": self.get_cluster_name(),
+                                "status": pod.status.phase,
+                                "pods_count": {
+                                    "desired": 1,
+                                    "available": 1 if pod.status.phase == "Running" else 0
+                                },
+                                "last_change": pod.metadata.creation_timestamp,
+                                "version": pod.metadata.resource_version,
+                                "cpu_usage": metrics['cpu'],
+                                "memory_usage": metrics['memory']
+                            })
+
+                except Exception as e:
+                    print(f"Error processing namespace {namespace}: {str(e)}")
+                    continue
+
+            return {
+                "resources": sorted(resources, key=lambda x: (x['namespace'], x['kind'], x['name'])),
+                "summary": {
+                    "total_resources": len(resources),
+                    "by_kind": {
+                        kind: len([r for r in resources if r['kind'] == kind])
+                        for kind in ["Deployment", "StatefulSet", "DaemonSet", "Pod"]
+                    },
+                    "by_namespace": {
+                        namespace: len([r for r in resources if r['namespace'] == namespace])
+                        for namespace in set(r['namespace'] for r in resources)
+                    }
+                }
+            }
+
+        except Exception as e:
+            raise Exception(f"Error getting workload resources: {str(e)}")
+
+    def get_cluster_name(self) -> str:
+        """Get the cluster name from current context"""
+        try:
+            _, active_context = config.list_kube_config_contexts()
+            return active_context['name']
+        except:
+            return "unknown-cluster" 

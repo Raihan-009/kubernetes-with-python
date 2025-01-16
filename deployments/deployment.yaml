@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-with-python
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubernetes-with-python
+  template:
+    metadata:
+      labels:
+        app: kubernetes-with-python
+    spec:
+      containers:
+      - name: kubernetes-with-python
+        image: tahnikahmed/kubernetes-with-python
+        ports:
+        - containerPort: 8000
+        env:
+        - name: KUBERNETES_SERVICE_HOST
+          value: "kubernetes.default.svc"
+        - name: KUBERNETES_SERVICE_PORT
+          value: "443"
